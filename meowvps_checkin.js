@@ -1,10 +1,41 @@
 const { setTimeout: delay } = require("node:timers/promises");
+const { setGlobalProxyFromEnv } = require("node:http");
+const { spawnSync } = require("node:child_process");
 
 const BASE_URL = (process.env.MEOWVPS_BASE_URL || "https://meowvps.com").replace(/\/$/, "");
 const LOGIN_PATH = process.env.MEOWVPS_LOGIN_PATH || "/auth/login/local";
 const CHECKIN_PATH = process.env.MEOWVPS_CHECKIN_PATH || "/auth/account/checkin";
 const FETCH_TIMEOUT_MS = Number(process.env.MEOWVPS_TIMEOUT_MS || 20000);
 const SCRIPT_NAME = "MeowVPS 每日签到";
+
+function configureProxy() {
+  const hasProxy = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+  ].some((name) => process.env[name]);
+  if (!hasProxy || process.env.NODE_USE_ENV_PROXY === "1") return;
+
+  if (typeof setGlobalProxyFromEnv === "function") {
+    setGlobalProxyFromEnv();
+    console.log("已启用 HTTP_PROXY / HTTPS_PROXY 环境代理。");
+    return;
+  }
+
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  const supportsStartupProxy = (major === 22 && minor >= 21) || major >= 24;
+  if (!supportsStartupProxy) {
+    throw new Error("当前 Node.js 版本无法使用环境代理。请升级到 22.21+ 或 24+，或在启动 Node 前设置 NODE_USE_ENV_PROXY=1。");
+  }
+
+  const child = spawnSync(process.execPath, process.argv.slice(1), {
+    env: { ...process.env, NODE_USE_ENV_PROXY: "1" },
+    stdio: "inherit",
+  });
+  if (child.error) throw new Error(`无法使用环境代理重启签到脚本：${child.error.message}`);
+  process.exit(child.status ?? 1);
+}
 
 function networkCodes(error) {
   if (!error) return [];
@@ -159,6 +190,7 @@ async function main() {
     if (!Number.isInteger(FETCH_TIMEOUT_MS) || FETCH_TIMEOUT_MS < 1 || FETCH_TIMEOUT_MS > 4294967295) {
       throw new Error("MEOWVPS_TIMEOUT_MS 必须是 1 到 4294967295 之间的整数。");
     }
+    configureProxy();
     if (diagnostic) return await diagnose();
 
     const username = process.env.MEOWVPS_USERNAME;

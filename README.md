@@ -1,6 +1,6 @@
 # MeowVPS 每日签到
 
-面向 Arcadia 的 Node.js 定时脚本。运行环境需要 Node.js 18 或更高版本。
+面向 Arcadia 的 Node.js 定时脚本。无代理时需要 Node.js 18 或更高版本。使用 `HTTP_PROXY` 或 `HTTPS_PROXY` 时需要 Node.js 22.21+ 或 24+，脚本会启用 Node.js 原生环境代理支持，并遵循 `NO_PROXY`。
 
 ## 环境变量
 
@@ -11,6 +11,7 @@
 - `MEOWVPS_LOGIN_PATH`：可选，默认 `/auth/login/local`。升级时可删除旧版的 `/auth/login` 覆盖值
 - `MEOWVPS_CHECKIN_PATH`：可选，默认 `/auth/account/checkin`
 - `MEOWVPS_TIMEOUT_MS`：可选，单次请求超时毫秒数，默认 `20000`
+- `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`：可选，使用 Arcadia 中已有的代理配置
 
 在 Arcadia 中将前三项配置为环境变量，并设置每天运行一次的计划任务。账户中心使用北京时间显示签到状态，建议把任务安排在北京时间每天 00:05 之后。
 
@@ -19,6 +20,8 @@ node meowvps_checkin.js
 ```
 
 登录和签到路径与 MeowVPS 账户中心的前端请求一致。脚本不会保存账户密码或 Bark key。
+
+较新 Node.js 版本支持脚本启动后启用代理。Node.js 22.21+ 或 24.0 至 24.13 会由脚本使用 `NODE_USE_ENV_PROXY=1` 自动重启一次。Node.js 24.14+ 会直接启用代理。
 
 ## 网络排查
 
