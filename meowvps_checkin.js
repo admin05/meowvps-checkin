@@ -1,3 +1,5 @@
+const { setTimeout: delay } = require("node:timers/promises");
+
 const BASE_URL = (process.env.MEOWVPS_BASE_URL || "https://meowvps.com").replace(/\/$/, "");
 const LOGIN_PATH = process.env.MEOWVPS_LOGIN_PATH || "/auth/login/local";
 const CHECKIN_PATH = process.env.MEOWVPS_CHECKIN_PATH || "/auth/account/checkin";
@@ -21,15 +23,21 @@ function networkError(step, hostname, error) {
   return new Error(`${step}无法访问 ${hostname}：${detail}`);
 }
 
-async function fetchWithTimeout(step, url, options) {
-  try {
-    return await fetch(url, {
-      ...options,
-      redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw networkError(step, url.hostname, error);
+async function fetchWithTimeout(step, url, options, retryReset = false) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetch(url, {
+        ...options,
+        redirect: "manual",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (!retryReset || attempt > 1 || !networkCodes(error).includes("ECONNRESET")) {
+        throw networkError(step, url.hostname, error);
+      }
+      console.warn(`${step}连接被重置（ECONNRESET），1 秒后重试一次。`);
+      await delay(1000);
+    }
   }
 }
 
@@ -54,24 +62,29 @@ function mergeCookies(jar, headers) {
   }
 }
 
-async function request(step, path, body, jar) {
+function accountUrl(path) {
   const url = new URL(path, `${BASE_URL}/`);
   if (url.origin !== new URL(BASE_URL).origin) {
     throw new Error("配置的接口路径必须属于 MeowVPS 站点。");
   }
+  return url;
+}
 
-  const headers = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    Origin: BASE_URL,
-    Referer: `${BASE_URL}/account/`,
-  };
+const ACCOUNT_HEADERS = {
+  Accept: "application/json",
+  Origin: BASE_URL,
+  Referer: `${BASE_URL}/account/`,
+};
+
+async function request(step, path, body, jar, retryReset = false) {
+  const url = accountUrl(path);
+  const headers = { ...ACCOUNT_HEADERS, "Content-Type": "application/json" };
   if (jar.size) headers.Cookie = [...jar].map(([key, value]) => `${key}=${value}`).join("; ");
   const response = await fetchWithTimeout(step, url, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
-  });
+  }, retryReset);
 
   if (response.status >= 300 && response.status < 400) {
     throw new Error(`${step}接口返回意外跳转（HTTP ${response.status}）`);
@@ -95,6 +108,26 @@ async function request(step, path, body, jar) {
   return data;
 }
 
+async function diagnose() {
+  console.log(`Node.js ${process.version}`);
+  const probes = [
+    { step: "账户探测", path: "/auth/me", method: "GET", expectedStatus: 200 },
+    { step: "登录探测", path: LOGIN_PATH, method: "POST", body: "{}", expectedStatus: 401 },
+  ];
+  for (const { step, path, method, body, expectedStatus } of probes) {
+    try {
+      const url = accountUrl(path);
+      const headers = body ? { ...ACCOUNT_HEADERS, "Content-Type": "application/json" } : ACCOUNT_HEADERS;
+      const response = await fetchWithTimeout(step, url, { method, headers, body });
+      console.log(`${step} ${url.hostname}${url.pathname} 返回 HTTP ${response.status}`);
+      if (response.status !== expectedStatus) process.exitCode = 1;
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+    }
+  }
+}
+
 async function sendBark(status, summary) {
   const key = process.env.BARK;
   if (!key) {
@@ -116,23 +149,26 @@ async function sendBark(status, summary) {
 }
 
 async function main() {
+  const diagnostic = process.argv.includes("--diagnose");
   let status = "失败";
   let summary;
   try {
-    const username = process.env.MEOWVPS_USERNAME;
-    const password = process.env.MEOWVPS_PASSWORD;
-    if (!username || !password) {
-      throw new Error("缺少环境变量 MEOWVPS_USERNAME 或 MEOWVPS_PASSWORD。");
-    }
     if (typeof fetch !== "function" || typeof AbortSignal.timeout !== "function") {
       throw new Error("当前 Node.js 运行时不支持 fetch/AbortSignal.timeout，请升级到 Node.js 18 或更高版本。");
     }
     if (!Number.isInteger(FETCH_TIMEOUT_MS) || FETCH_TIMEOUT_MS < 1 || FETCH_TIMEOUT_MS > 4294967295) {
       throw new Error("MEOWVPS_TIMEOUT_MS 必须是 1 到 4294967295 之间的整数。");
     }
+    if (diagnostic) return await diagnose();
+
+    const username = process.env.MEOWVPS_USERNAME;
+    const password = process.env.MEOWVPS_PASSWORD;
+    if (!username || !password) {
+      throw new Error("缺少环境变量 MEOWVPS_USERNAME 或 MEOWVPS_PASSWORD。");
+    }
 
     const jar = new Map();
-    await request("登录", LOGIN_PATH, { username, password }, jar);
+    await request("登录", LOGIN_PATH, { username, password }, jar, true);
     if (!jar.size) throw new Error("登录接口没有返回会话 Cookie。");
 
     const result = await request("签到", CHECKIN_PATH, {}, jar);
@@ -150,6 +186,8 @@ async function main() {
   } catch (error) {
     summary = error instanceof Error ? error.message : String(error);
     console.error(`${SCRIPT_NAME}失败：${summary}`);
+    process.exitCode = 1;
+    if (diagnostic) return;
   }
 
   try {
@@ -159,8 +197,6 @@ async function main() {
     console.error(`${SCRIPT_NAME}：${message}`);
     process.exitCode = 1;
   }
-
-  if (status === "失败") process.exitCode = 1;
 }
 
 main();

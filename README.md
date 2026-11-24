@@ -23,3 +23,11 @@ node meowvps_checkin.js
 ## 网络排查
 
 请在 Arcadia 的任务日志中查看请求阶段、主机名和底层错误码。`ENOTFOUND`、`EAI_AGAIN` 通常指向容器的 DNS 设置。`ENETUNREACH`、`ETIMEDOUT` 或 `UND_ERR_CONNECT_TIMEOUT` 则需要检查容器到该主机的网络连通性。
+
+登录连接在收到 HTTP 响应前出现 `ECONNRESET` 时，脚本会等待 1 秒并重试一次。如果仍然失败，请在运行 Arcadia 任务的同一个容器里手动执行：
+
+```sh
+node meowvps_checkin.js --diagnose
+```
+
+诊断模式会访问账户接口，并向登录接口发送一次不含账号密码的请求。通常分别返回 HTTP 200 和 HTTP 401。若两项都出现 `ECONNRESET`，请检查容器的网络出口。若账户探测成功，只有登录探测被重置，请检查网络出口或站点对登录请求的处理。诊断模式只输出到任务日志。
