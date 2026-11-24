@@ -1,14 +1,35 @@
 const BASE_URL = (process.env.MEOWVPS_BASE_URL || "https://meowvps.com").replace(/\/$/, "");
-const LOGIN_PATH = process.env.MEOWVPS_LOGIN_PATH || "/auth/login";
+const LOGIN_PATH = process.env.MEOWVPS_LOGIN_PATH || "/auth/login/local";
 const CHECKIN_PATH = process.env.MEOWVPS_CHECKIN_PATH || "/auth/account/checkin";
 const FETCH_TIMEOUT_MS = Number(process.env.MEOWVPS_TIMEOUT_MS || 20000);
 const SCRIPT_NAME = "MeowVPS 每日签到";
 
-function parseJson(text) {
+function networkCodes(error) {
+  if (!error) return [];
+  return [
+    error.code,
+    ...networkCodes(error.cause),
+    ...(error.errors || []).flatMap(networkCodes),
+  ].filter((code) => typeof code === "string" && /^[A-Z][A-Z0-9_]+$/.test(code));
+}
+
+function networkError(step, hostname, error) {
+  const codes = [...new Set(networkCodes(error))].join(", ");
+  const detail = error.name === "TimeoutError"
+    ? `请求超过 ${FETCH_TIMEOUT_MS} 毫秒`
+    : codes || "连接失败（无底层错误码）";
+  return new Error(`${step}无法访问 ${hostname}：${detail}`);
+}
+
+async function fetchWithTimeout(step, url, options) {
   try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    return { message: text.slice(0, 300) };
+    return await fetch(url, {
+      ...options,
+      redirect: "manual",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw networkError(step, url.hostname, error);
   }
 }
 
@@ -33,7 +54,7 @@ function mergeCookies(jar, headers) {
   }
 }
 
-async function request(path, { method = "GET", body, jar = new Map() } = {}) {
+async function request(step, path, body, jar) {
   const url = new URL(path, `${BASE_URL}/`);
   if (url.origin !== new URL(BASE_URL).origin) {
     throw new Error("配置的接口路径必须属于 MeowVPS 站点。");
@@ -41,36 +62,36 @@ async function request(path, { method = "GET", body, jar = new Map() } = {}) {
 
   const headers = {
     Accept: "application/json",
+    "Content-Type": "application/json",
     Origin: BASE_URL,
     Referer: `${BASE_URL}/account/`,
   };
   if (jar.size) headers.Cookie = [...jar].map(([key, value]) => `${key}=${value}`).join("; ");
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-
-  const response = await fetch(url, {
-    method,
+  const response = await fetchWithTimeout(step, url, {
+    method: "POST",
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    redirect: "manual",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    body: JSON.stringify(body),
   });
-  mergeCookies(jar, response.headers);
 
   if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location");
-    if (location) {
-      const redirectUrl = new URL(location, url);
-      if (redirectUrl.origin !== url.origin) throw new Error("站点返回了非预期的跨域跳转。");
-      return request(`${redirectUrl.pathname}${redirectUrl.search}`, { jar });
-    }
+    throw new Error(`${step}接口返回意外跳转（HTTP ${response.status}）`);
   }
 
-  const text = await response.text();
-  const data = parseJson(text);
-  if (!response.ok || data.error || data.ok === false || data.success === false) {
-    const detail = data.error || data.code || data.message || `HTTP ${response.status}`;
-    throw new Error(String(detail).slice(0, 300));
+  let data;
+  try {
+    data = await response.json();
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw networkError(step, url.hostname, error);
   }
+  if (!response.ok || data?.error || data?.ok === false || data?.success === false) {
+    const code = data?.error || data?.code;
+    const detail = typeof code === "string" && /^[a-z_]{1,80}$/i.test(code) ? `，${code}` : "";
+    throw new Error(`${step}接口报错（HTTP ${response.status}${detail}）`);
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`${step}接口返回了意外内容（HTTP ${response.status}）`);
+  }
+  mergeCookies(jar, response.headers);
   return data;
 }
 
@@ -81,7 +102,7 @@ async function sendBark(status, summary) {
     return;
   }
 
-  const response = await fetch("https://api.day.app/push", {
+  const response = await fetchWithTimeout("Bark 通知", new URL("https://api.day.app/push"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -90,7 +111,6 @@ async function sendBark(status, summary) {
       body: summary.slice(0, 1000),
       group: "MeowVPS",
     }),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Bark 推送失败（HTTP ${response.status}）。`);
 }
@@ -107,20 +127,26 @@ async function main() {
     if (typeof fetch !== "function" || typeof AbortSignal.timeout !== "function") {
       throw new Error("当前 Node.js 运行时不支持 fetch/AbortSignal.timeout，请升级到 Node.js 18 或更高版本。");
     }
+    if (!Number.isInteger(FETCH_TIMEOUT_MS) || FETCH_TIMEOUT_MS < 1 || FETCH_TIMEOUT_MS > 4294967295) {
+      throw new Error("MEOWVPS_TIMEOUT_MS 必须是 1 到 4294967295 之间的整数。");
+    }
 
     const jar = new Map();
-    await request(LOGIN_PATH, {
-      method: "POST",
-      body: { username, password },
-      jar,
-    });
-    const result = await request(CHECKIN_PATH, { method: "POST", body: {}, jar });
-    const details = [result.message, result.summary, result.reward ? `奖励：${result.reward}` : ""]
-      .filter((value) => typeof value === "string" && value.trim())
-      .join("；");
-    status = "成功";
-    summary = details || "签到请求已完成。";
-    console.log(`${SCRIPT_NAME}成功：${summary}`);
+    await request("登录", LOGIN_PATH, { username, password }, jar);
+    if (!jar.size) throw new Error("登录接口没有返回会话 Cookie。");
+
+    const result = await request("签到", CHECKIN_PATH, {}, jar);
+    if (result.awarded === true) {
+      status = "成功";
+      const amount = Number(result.amount);
+      summary = amount > 0 ? `签到数 +1，额外获得 ${amount} 猫币。` : "签到数 +1。";
+    } else if (result.checkedIn === true) {
+      status = "今日已签到";
+      summary = "站点显示今日已完成签到。";
+    } else {
+      throw new Error("签到接口未确认今日签到状态。");
+    }
+    console.log(`${SCRIPT_NAME}：${status}，${summary}`);
   } catch (error) {
     summary = error instanceof Error ? error.message : String(error);
     console.error(`${SCRIPT_NAME}失败：${summary}`);
@@ -131,7 +157,7 @@ async function main() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`${SCRIPT_NAME}：${message}`);
-    if (status === "成功") process.exitCode = 1;
+    process.exitCode = 1;
   }
 
   if (status === "失败") process.exitCode = 1;

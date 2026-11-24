@@ -8,7 +8,7 @@
 - `MEOWVPS_PASSWORD`：MeowVPS 账户密码
 - `BARK`：Bark 推送 key；未设置时签到仍会执行，只跳过通知
 - `MEOWVPS_BASE_URL`：可选，默认 `https://meowvps.com`
-- `MEOWVPS_LOGIN_PATH`：可选，默认 `/auth/login`
+- `MEOWVPS_LOGIN_PATH`：可选，默认 `/auth/login/local`。升级时可删除旧版的 `/auth/login` 覆盖值
 - `MEOWVPS_CHECKIN_PATH`：可选，默认 `/auth/account/checkin`
 - `MEOWVPS_TIMEOUT_MS`：可选，单次请求超时毫秒数，默认 `20000`
 
@@ -18,4 +18,8 @@
 node meowvps_checkin.js
 ```
 
-登录和签到接口属于站点内部接口，站点没有公开 API 文档。脚本默认使用账户中心常见路径；若站点调整接口，可通过 `MEOWVPS_LOGIN_PATH` 和 `MEOWVPS_CHECKIN_PATH` 覆盖。脚本不会保存账户密码或 Bark key。
+登录和签到路径与 MeowVPS 账户中心的前端请求一致。脚本不会保存账户密码或 Bark key。
+
+## 网络排查
+
+请在 Arcadia 的任务日志中查看请求阶段、主机名和底层错误码。`ENOTFOUND`、`EAI_AGAIN` 通常指向容器的 DNS 设置。`ENETUNREACH`、`ETIMEDOUT` 或 `UND_ERR_CONNECT_TIMEOUT` 则需要检查容器到该主机的网络连通性。
